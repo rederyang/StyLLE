@@ -14,8 +14,10 @@ SRC_ACTIVATIONS = None  # source activations, shape: [num_samples, num_layers, n
 TGT_ACTIVATIONS = None  # target activations, shape: [num_samples, num_layers, num_heads, head_dim]
 SS_RANK = {}  # style subspace rank
 SS_VH = {}  # style subspace Vh
-SS_PROJ_SRC_MEAN_ACT = {}  # style subspace projection of source activations
-SS_PROJ_TGT_MEAN_ACT = {}  # style subspace projection of target activations
+SS_PROJ_SRC_ACT = {}  # style subspace projection of source activations
+SS_PROJ_TGT_ACT = {}  # style subspace projection of target activations
+SS_PROJ_SRC_MEAN_ACT = {}  # style subspace projection of source activations mean
+SS_PROJ_TGT_MEAN_ACT = {}  # style subspace projection of target activations mean
 SELECTED_HEADS_BY_LAYER = {}  # layer -> head, selected heads
 
 
@@ -30,31 +32,35 @@ def parse_args():
     rank_group = parser.add_mutually_exclusive_group()
     rank_group.add_argument("--rank", type=int)
     rank_group.add_argument("--adaRank", action="store_true")
-    parser.add_argument("--var_threshold", type=float, default=0.5)
-    # acceleration
-    parser.add_argument("--generation_method", type=str, choices=["baseline", "fast", "faster"], required=True)
+    parser.add_argument("--var_threshold", type=float, default=None)
+    # style strength
+    parser.add_argument("--beta", type=float, default=3.0)
     # KNN
     parser.add_argument("--KNN_neighbor_num", type=int, default=None)
+    # acceleration
+    parser.add_argument("--generation_method", type=str, choices=["baseline", "fast", "faster"], required=True)
     return parser.parse_args()
 
-def search_rank_BIC(X, U, s, Vh, var_threshold, constrain_range=False):
+def search_rank_BIC(X, U, s, Vh, var_threshold=None):
     N, D = X.shape
+    # prevent overflow
+    X, U, s, Vh = X.to(torch.float32), U.to(torch.float32), s.to(torch.float32), Vh.to(torch.float32)
 
     # calculate explained variance
     var_explained = (s**2) / torch.sum(s**2)
-    cumulative_var_explained = torch.cumsum(var_explained)
-    
-    # find the minimum rank value that satisfies the threshold
-    r_var = torch.argmax(cumulative_var_explained >= var_threshold) + 1
+    cumulative_var_explained = torch.cumsum(var_explained, dim=0)
     
     # define search range
-    r_min = r_var if constrain_range else 1
-    r_max = s.shape[0] - 1
+    r_min, r_max = 1, s.shape[0] - 1
+    if var_threshold is not None:
+        # find the minimum rank value that satisfies the threshold
+        r_min = torch.argmax((cumulative_var_explained >= var_threshold).int()) + 1
     
     # search for the optimal rank
     best_r = r_min
     best_BIC = float('inf')
-    
+    best_r_var = cumulative_var_explained[r_min]
+
     for r in range(r_min, r_max + 1):
         # use the first r singular values and vectors to reconstruct the data
         X_reconstructed = U[:, :r] @ torch.diag(s[:r]) @ Vh[:r, :]
@@ -64,23 +70,24 @@ def search_rank_BIC(X, U, s, Vh, var_threshold, constrain_range=False):
         
         # calculate the BIC
         # BIC = N * D * log(MSE) + r * (N + D + 1) * log(N * D)
-        BIC = N * D * torch.log(MSE) + r * (N + D + 1) * torch.log(N * D)
+        BIC = N * D * torch.log(MSE) + r * (N + D + 1) * torch.log(torch.tensor(N * D * 1.0))
         
         if BIC < best_BIC:
             best_BIC = BIC
             best_r = r
+            best_r_var = cumulative_var_explained[r - 1]
 
-    return best_r, best_BIC
+    return best_r, best_BIC, best_r_var
 
 def svd_decomposition(rank=None, adaRank=False, var_threshold=None):
     # either rank or adaRank
-    assert rank is not None or (adaRank is not None and var_threshold is not None)
+    assert rank is not None or adaRank
     if adaRank:
         print("adaRank with var_threshold =", var_threshold)
     else:
         print("rank =", rank)
 
-    global SS_RANK, SS_VH, SS_PROJ_SRC_MEAN_ACT, SS_PROJ_TGT_MEAN_ACT
+    global SS_RANK, SS_VH, SS_PROJ_SRC_ACT, SS_PROJ_TGT_ACT, SS_PROJ_SRC_MEAN_ACT, SS_PROJ_TGT_MEAN_ACT
 
     for layer_idx in SELECTED_HEADS_BY_LAYER:
         for head_idx in SELECTED_HEADS_BY_LAYER[layer_idx]:
@@ -97,38 +104,47 @@ def svd_decomposition(rank=None, adaRank=False, var_threshold=None):
             proj_tgt_activations = torch.matmul(tgt_activations, Vh.T)
 
             if adaRank:
-                rank, _ = search_rank_BIC(delta_activations, U, s, Vh, var_threshold)
+                rank, BIC, r_var = search_rank_BIC(delta_activations, U, s, Vh, var_threshold)
+                print(f"Layer {layer_idx}, head {head_idx}, rank: {rank}, BIC: {BIC}, Var explained: {r_var}")
 
             SS_RANK[(layer_idx, head_idx)] = rank
             SS_VH[(layer_idx, head_idx)] = Vh
+            SS_PROJ_SRC_ACT[(layer_idx, head_idx)] = proj_src_activations
+            SS_PROJ_TGT_ACT[(layer_idx, head_idx)] = proj_tgt_activations
             SS_PROJ_SRC_MEAN_ACT[(layer_idx, head_idx)] = torch.mean(proj_src_activations, dim=0)
             SS_PROJ_TGT_MEAN_ACT[(layer_idx, head_idx)] = torch.mean(proj_tgt_activations, dim=0)
 
-def get_steering_vector(layer_idx, head_idx, cur_activations, beta=3.0):  # FIXME: beta is hard-coded
+def get_steering_vector(layer_idx, head_idx, cur_activations, beta=3.0, KNN_neighbor_num=None):
     # read from global variables
     rank = SS_RANK[(layer_idx, head_idx)]
     Vh = SS_VH[(layer_idx, head_idx)][:rank, :]
-    proj_src_mean_act = SS_PROJ_SRC_MEAN_ACT[(layer_idx, head_idx)][:rank]
-    proj_tgt_mean_act = SS_PROJ_TGT_MEAN_ACT[(layer_idx, head_idx)][:rank]
+    proj_cur_act = torch.matmul(Vh, cur_activations)
+
+    if KNN_neighbor_num is None:  # global mean
+        proj_src_mean_act = SS_PROJ_SRC_MEAN_ACT[(layer_idx, head_idx)][:rank]
+        proj_tgt_mean_act = SS_PROJ_TGT_MEAN_ACT[(layer_idx, head_idx)][:rank]
+    else:  # use KNN to get local mean
+        proj_src_all_act = SS_PROJ_SRC_ACT[(layer_idx, head_idx)][:, :rank]
+        proj_tgt_all_act = SS_PROJ_TGT_ACT[(layer_idx, head_idx)][:, :rank]
+        dist = torch.norm(proj_cur_act[None, ...] - proj_src_all_act, dim=1)
+        knn_dist, knn_idx = torch.topk(dist, KNN_neighbor_num, largest=False)
+        proj_src_mean_act = torch.mean(proj_src_all_act[knn_idx], dim=0)  # KNN mean
+        proj_tgt_mean_act = torch.mean(proj_tgt_all_act[knn_idx], dim=0)  # KNN mean
 
     # base strength, determined by the dataset
     base_strength = proj_tgt_mean_act - proj_src_mean_act
 
     # diff strength, determined by the current activations
-    proj_cur_activations = torch.matmul(Vh, cur_activations)
-    diff_strength = proj_tgt_mean_act - proj_cur_activations
+    diff_strength = proj_tgt_mean_act - proj_cur_act
 
-    # combine
-    strength = base_strength * (1 + 0.5 * torch.sign(base_strength) * diff_strength)
+    # combine and apply global scaling factor beta
+    strength = beta * base_strength * (1 + 0.5 * torch.sign(base_strength) * diff_strength)
 
     steering_vector = torch.matmul(Vh.T, strength)
 
-    # apply global scaling factor
-    steering_vector = beta * steering_vector
-
     return steering_vector
 
-def edit_model_bias(model, cur_activations):
+def edit_model_bias(model, cur_activations, **kwargs):
     """
     model: model to edit
     cur_activations: torch tensor, shape: (num_layers, seq_len, num_heads * head_dim)
@@ -141,7 +157,7 @@ def edit_model_bias(model, cur_activations):
                                    device=model.device, dtype=model.dtype)
         for head_idx in head_idx_list:
             cur_head_activations = cur_activations[layer_idx, -1, head_idx]  # vector of shape (head_dim,)
-            steering_vector = get_steering_vector(layer_idx, head_idx, cur_head_activations)
+            steering_vector = get_steering_vector(layer_idx, head_idx, cur_head_activations, **kwargs)
             displacement[head_idx] = steering_vector
 
         displacement = rearrange(displacement, 'h d -> (h d)')
@@ -154,7 +170,7 @@ def reset_model(model):
         zero_bias = torch.zeros(model.config.hidden_size, dtype=model.dtype, device=model.device)
         model.model.layers[layer_idx].self_attn.o_proj.bias = torch.nn.parameter.Parameter(zero_bias)
 
-def generate(model, question_tokens, qa_prefix_tokens, max_length=600):
+def generate(model, question_tokens, qa_prefix_tokens, max_length=600, **kwargs):
 
     tokens_without_template = question_tokens
     tokens_with_template = qa_prefix_tokens
@@ -165,7 +181,7 @@ def generate(model, question_tokens, qa_prefix_tokens, max_length=600):
             # edit
             reset_model(model)
             cur_activations, _ = get_activations(model, tokens_without_template)
-            edit_model_bias(model, cur_activations)
+            edit_model_bias(model, cur_activations, **kwargs)
 
             # predict next token
             outputs = model(tokens_with_template)
@@ -185,7 +201,7 @@ def generate(model, question_tokens, qa_prefix_tokens, max_length=600):
 
     return answer_token_ids
 
-def generate_fast(model, question_tokens, qa_prefix_tokens, max_length=600):
+def generate_fast(model, question_tokens, qa_prefix_tokens, max_length=600, **kwargs):
     """Use kv cache for base forward, but not for style forward. This implementation completely follows the
     implementation of the original paper, just using kv cache for acceleration."""
     tokens_without_template = question_tokens
@@ -202,7 +218,7 @@ def generate_fast(model, question_tokens, qa_prefix_tokens, max_length=600):
                                                             tokens_without_template if past_kv_base is None else token,
                                                             use_cache=True,
                                                             past_key_values=past_kv_base)
-            edit_model_bias(model, cur_activations)
+            edit_model_bias(model, cur_activations, **kwargs)
 
             # predict next token, recalculate from the first token
             outputs = model(tokens_with_template)
@@ -224,7 +240,7 @@ def generate_fast(model, question_tokens, qa_prefix_tokens, max_length=600):
 
     return answer_token_ids
 
-def generate_faster(model, question_tokens, qa_prefix_tokens, max_length=600):
+def generate_faster(model, question_tokens, qa_prefix_tokens, max_length=600, **kwargs):
     """Use kv cache for base forward and style forward. This implementation slightly relaxed the constraint of the original paper.
     But yields similar performance with better speed."""
     tokens_without_template = question_tokens
@@ -242,7 +258,7 @@ def generate_faster(model, question_tokens, qa_prefix_tokens, max_length=600):
                                                             tokens_without_template if past_kv_base is None else token,
                                                             use_cache=True,
                                                             past_key_values=past_kv_base)
-            edit_model_bias(model, cur_activations)
+            edit_model_bias(model, cur_activations, **kwargs)
 
             # predict next token with kv cache
             # Note that past_kv_style here is computed by model variants
@@ -286,6 +302,8 @@ def main(args):
         with open("dataset/Valid_DRC.json", 'r', encoding='utf-8') as file:
             dataset = json.load(file)
             format_func = format_tqa_DRC
+            # FIXME: temporary template
+            format_func = lambda question, answer: "请你对下面的语句作出回应：\n" + question + "\n好的，我的回答如下：\n" + answer
     elif args.dataset == "Shakespeare": 
         with open("dataset/Valid_Shakespeare.json", 'r', encoding='utf-8') as file:
             dataset = json.load(file)
@@ -336,14 +354,22 @@ def main(args):
 
         # question is the the questions itself, qa_prefix is the question with the qa template
         question = sample["question"]
-        # FIXME: temporary template
-        # qa_prefix = format_func(question, "")
-        qa_prefix = "请你对下面的语句作出回应：\n" + question + "\n好的，我的回答如下：\n"
+        qa_prefix = format_func(question, "")
+        if index == 0:
+            print("sanity check: sample[0]")
+            print(f"___question___")
+            print(question)
+            print(f"___qa_prefix___")
+            print(qa_prefix)
         question_tokens = tokenizer(question, return_tensors='pt').input_ids.to(model.device)
         qa_prefix_tokens = tokenizer(qa_prefix, return_tensors='pt').input_ids.to(model.device)
 
         tik = time.time()
-        response = generate_method(model, question_tokens, qa_prefix_tokens)
+        response = generate_method(model,
+                                   question_tokens,
+                                   qa_prefix_tokens,
+                                   beta=args.beta,
+                                   KNN_neighbor_num=args.KNN_neighbor_num)
         time_cost = time.time() - tik
 
         cum_time += time_cost
@@ -370,16 +396,26 @@ def main(args):
 
     os.makedirs(args.save_dir, exist_ok=True)
 
-    output_path = args.save_dir + "/results.json"
+    # save generation results
+    save_name = args.save_dir.split("/")[-1]
+    output_path = os.path.join(args.save_dir, save_name + "_results.json")
     with open(output_path, 'w', encoding='utf-8') as file:
         json.dump(output_data, file, ensure_ascii=False, indent=4)
 
-    output_path = args.save_dir + "/speed.txt"
+    # save speed
+    output_path = os.path.join(args.save_dir, "speed.txt")
     with open(output_path, 'w', encoding='utf-8') as file:
         file.write(f"Question number: {len(dataset)}\n"
         f"Cumulative token number: {cum_token}\n"
         f"Time cost: {cum_time} s\n"
         f"Average generation speed: {cum_token/cum_time} token/s")
+
+    # save rank
+    output_path = os.path.join(args.save_dir, "rank.json")
+    with open(output_path, 'w', encoding='utf-8') as file:
+        ranks = {f"{layer_idx}_{head_idx}": rank 
+                 for (layer_idx, head_idx), rank in SS_RANK.items()}
+        json.dump(ranks, file, ensure_ascii=False, indent=4)
 
     print("Results saved to", args.save_dir)
 
