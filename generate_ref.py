@@ -1,10 +1,9 @@
 import os
 import json
 import argparse
-import torch
 import time
+import transformers
 
-import qwen2
 from utils import format_tqa_DRC, format_tqa_Shakespeare
 
 def parse_args():
@@ -17,11 +16,12 @@ def parse_args():
 def main(args):
     # load model
     print("Loading model...")
-    tokenizer = qwen2.Qwen2Tokenizer.from_pretrained(args.model_dir)
-    model = qwen2.Qwen2ForCausalLM.from_pretrained(args.model_dir,
-                                                   low_cpu_mem_usage=True,
-                                                   torch_dtype=torch.float16,  # FIXME: should be model.dtype
-                                                   device_map="auto")
+    config = transformers.AutoConfig.from_pretrained(args.model_dir)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_dir)
+    model = transformers.AutoModelForCausalLM.from_pretrained(args.model_dir,
+                                                             low_cpu_mem_usage=True,
+                                                             torch_dtype=config.torch_dtype,
+                                                             device_map="auto")
 
     # load dataset
     print("Loading dataset...")
@@ -29,9 +29,7 @@ def main(args):
         with open("dataset/Valid_DRC.json", 'r', encoding='utf-8') as file:
             dataset = json.load(file)
             format_func = format_tqa_DRC
-            # FIXME: temporary template
-            format_func = lambda question, answer: "请你对下面的语句作出回应：\n" + question + "\n好的，我的回答如下：\n" + answer
-    elif args.dataset == "Shakespeare": 
+    elif args.dataset == "Shakespeare":
         with open("dataset/Valid_Shakespeare.json", 'r', encoding='utf-8') as file:
             dataset = json.load(file)
             format_func = format_tqa_Shakespeare
@@ -50,7 +48,7 @@ def main(args):
         question = sample["question"]
         qa_prefix = format_func(question, "")
         if index == 0:
-            print("sanity check: sample[0]")
+            print("sanity check:")
             print(f"___question___")
             print(question)
             print(f"___qa_prefix___")

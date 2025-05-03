@@ -2,9 +2,9 @@ import os
 import json
 import torch
 import argparse
+import transformers
 from tqdm import tqdm
 
-import qwen2
 from utils import prepare_tqa_dataset, format_tqa_DRC, format_tqa_Shakespeare, get_activations
 
 
@@ -19,11 +19,12 @@ def parse_args():
 def main(args):
     # load model
     print("Loading model...")
-    tokenizer = qwen2.Qwen2Tokenizer.from_pretrained(args.model_dir)
-    model = qwen2.Qwen2ForCausalLM.from_pretrained(args.model_dir,
-                                                   low_cpu_mem_usage=True,
-                                                   torch_dtype=torch.float16,  # FIXME: should be model.dtype
-                                                   device_map="auto")
+    config = transformers.AutoConfig.from_pretrained(args.model_dir)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_dir)
+    model = transformers.AutoModelForCausalLM.from_pretrained(args.model_dir,
+                                                             low_cpu_mem_usage=True,
+                                                             torch_dtype=config.torch_dtype,
+                                                             device_map="auto")
 
     # load data
     if args.dataset == "DRC":
@@ -47,7 +48,7 @@ def main(args):
     print("Getting activations...")
     source_activations = []
     target_activations = []
-    for i in tqdm(range(len(qa_prefix_tokens))): 
+    for i in tqdm(range(len(qa_prefix_tokens))):
         src_act, _ = get_activations(model, source_qa_tokens[i])
         src_act = src_act[:, -1, :].cpu().clone()
         tgt_act, _ = get_activations(model, target_qa_tokens[i])
@@ -64,7 +65,7 @@ def main(args):
     torch.save({
         "source_activations": source_activations,
         "target_activations": target_activations,
-    }, os.path.join(args.save_dir, f'{args.dataset}_act.pt'))
+    }, os.path.join(args.save_dir, f'act.pt'))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,8 @@
+torch
+transformers
+accelerate
+tqdm
+einops
+git+https://github.com/davidbau/baukit.git@main  # baukit
+numpy
+scikit-learn

@@ -23,10 +23,6 @@ def get_top_heads(source_activations, target_activations, model_layers, model_he
 
     idx2layer_head = lambda idx: (idx // model_heads, idx % model_heads)
 
-    # convert everything to numpy
-    source_activations = source_activations.numpy()
-    target_activations = target_activations.numpy()
-
     # split train and val set
     train_idxs = np.arange(len(source_activations))
     train_set_idxs = np.random.choice(train_idxs, size=int(len(train_idxs)*(1-args.val_ratio)), replace=False)
@@ -40,14 +36,14 @@ def get_top_heads(source_activations, target_activations, model_layers, model_he
     # linear probing for each head
     print("Train linear probing for each head...")
     val_accs = []
-    for layer in tqdm(range(model_layers)):
-        for head in range(model_heads):
-            X_train_head = X_train[:, layer, head, :]
-            X_val_head = X_val[:, layer, head, :]
+    layer_head = [(l, h) for l in range(model_layers) for h in range(model_heads)]
+    for layer, head in tqdm(layer_head):
+        X_train_head = X_train[:, layer, head, :]
+        X_val_head = X_val[:, layer, head, :]
 
-            clf = LogisticRegression(random_state=seed, max_iter=1000).fit(X_train_head, y_train)
-            y_val_pred = clf.predict(X_val_head)
-            val_accs.append(accuracy_score(y_val, y_val_pred))
+        clf = LogisticRegression(random_state=seed, max_iter=1000).fit(X_train_head, y_train)
+        y_val_pred = clf.predict(X_val_head)
+        val_accs.append(accuracy_score(y_val, y_val_pred))
 
     # get top heads
     top_head_idxs = np.argsort(val_accs)[::-1][:num_to_select]
@@ -82,8 +78,8 @@ def main(args):
     # load activations
     print("Loading activations...")
     activations = torch.load(args.activations_path)
-    source_activations = rearrange(activations["source_activations"], "b l (h d) -> b l h d", h=MODEL_HEADS)
-    target_activations = rearrange(activations["target_activations"], "b l (h d) -> b l h d", h=MODEL_HEADS)
+    source_activations = rearrange(activations["source_activations"], "b l (h d) -> b l h d", h=MODEL_HEADS).to(torch.float32).numpy()
+    target_activations = rearrange(activations["target_activations"], "b l (h d) -> b l h d", h=MODEL_HEADS).to(torch.float32).numpy()
     print(f"source activations shape: {source_activations.shape}")
     print(f"target activations shape: {target_activations.shape}")
 

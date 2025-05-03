@@ -4,9 +4,9 @@ import argparse
 import torch
 import torch.nn.functional as F
 import time
+import transformers
 from einops import rearrange
 
-import qwen2
 from utils import format_tqa_DRC, format_tqa_Shakespeare, get_activations
 
 # global variables to share across functions
@@ -28,13 +28,15 @@ def parse_args():
     parser.add_argument("--selected_heads_path", type=str, required=True)
     parser.add_argument("--model_dir", type=str, required=True)
     parser.add_argument("--save_dir", type=str, required=True)
+    # head number
+    parser.add_argument("--head_num", type=int, default=64)
     # rank selection
     rank_group = parser.add_mutually_exclusive_group()
     rank_group.add_argument("--rank", type=int)
     rank_group.add_argument("--adaRank", action="store_true")
     parser.add_argument("--var_threshold", type=float, default=None)
-    # style strength
-    parser.add_argument("--beta", type=float, default=3.0)
+    # global style scaling factor
+    parser.add_argument("--global_scaling_factor", type=float, default=3.0)
     # KNN
     parser.add_argument("--KNN_neighbor_num", type=int, default=None)
     # acceleration
@@ -114,7 +116,7 @@ def svd_decomposition(rank=None, adaRank=False, var_threshold=None):
             SS_PROJ_SRC_MEAN_ACT[(layer_idx, head_idx)] = torch.mean(proj_src_activations, dim=0)
             SS_PROJ_TGT_MEAN_ACT[(layer_idx, head_idx)] = torch.mean(proj_tgt_activations, dim=0)
 
-def get_steering_vector(layer_idx, head_idx, cur_activations, beta=3.0, KNN_neighbor_num=None):
+def get_steering_vector(layer_idx, head_idx, cur_activations, global_scaling_factor=3.0, KNN_neighbor_num=None):
     # read from global variables
     rank = SS_RANK[(layer_idx, head_idx)]
     Vh = SS_VH[(layer_idx, head_idx)][:rank, :]
@@ -137,8 +139,8 @@ def get_steering_vector(layer_idx, head_idx, cur_activations, beta=3.0, KNN_neig
     # diff strength, determined by the current activations
     diff_strength = proj_tgt_mean_act - proj_cur_act
 
-    # combine and apply global scaling factor beta
-    strength = beta * base_strength * (1 + 0.5 * torch.sign(base_strength) * diff_strength)
+    # combine and apply global scaling factor
+    strength = global_scaling_factor * base_strength * (1 + 0.5 * torch.sign(base_strength) * diff_strength)
 
     steering_vector = torch.matmul(Vh.T, strength)
 
@@ -196,7 +198,7 @@ def generate(model, question_tokens, qa_prefix_tokens, max_length=600, **kwargs)
             # collect answer token ids
             answer_token_ids.append(token.cpu().numpy()[0][0])
 
-            if token.cpu().numpy()[0][0] == 151643 or token.cpu().numpy()[0][0] == 151644 or token.cpu().numpy()[0][0] == 151645: 
+            if token.cpu().numpy()[0][0] == 151643 or token.cpu().numpy()[0][0] == 151644 or token.cpu().numpy()[0][0] == 151645:
                 break
 
     return answer_token_ids
@@ -235,7 +237,7 @@ def generate_fast(model, question_tokens, qa_prefix_tokens, max_length=600, **kw
             # collect answer token ids
             answer_token_ids.append(token.cpu().numpy()[0][0])
 
-            if token.cpu().numpy()[0][0] == 151643 or token.cpu().numpy()[0][0] == 151644 or token.cpu().numpy()[0][0] == 151645: 
+            if token.cpu().numpy()[0][0] == 151643 or token.cpu().numpy()[0][0] == 151644 or token.cpu().numpy()[0][0] == 151645:
                 break
 
     return answer_token_ids
@@ -281,7 +283,7 @@ def generate_faster(model, question_tokens, qa_prefix_tokens, max_length=600, **
             # collect answer token ids
             answer_token_ids.append(token.cpu().numpy()[0][0])
 
-            if token.cpu().numpy()[0][0] == 151643 or token.cpu().numpy()[0][0] == 151644 or token.cpu().numpy()[0][0] == 151645: 
+            if token.cpu().numpy()[0][0] == 151643 or token.cpu().numpy()[0][0] == 151644 or token.cpu().numpy()[0][0] == 151645:
                 break
 
     return answer_token_ids
@@ -289,11 +291,12 @@ def generate_faster(model, question_tokens, qa_prefix_tokens, max_length=600, **
 def main(args):
     # load model
     print("Loading model...")
-    tokenizer = qwen2.Qwen2Tokenizer.from_pretrained(args.model_dir)
-    model = qwen2.Qwen2ForCausalLM.from_pretrained(args.model_dir,
-                                                   low_cpu_mem_usage=True,
-                                                   torch_dtype=torch.float16,  # FIXME: should be model.dtype
-                                                   device_map="auto")
+    config = transformers.AutoConfig.from_pretrained(args.model_dir)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_dir)
+    model = transformers.AutoModelForCausalLM.from_pretrained(args.model_dir,
+                                                             low_cpu_mem_usage=True,
+                                                             torch_dtype=config.torch_dtype,
+                                                             device_map="auto")
     model.config.oproj_bias = True
 
     # load dataset
@@ -302,9 +305,7 @@ def main(args):
         with open("dataset/Valid_DRC.json", 'r', encoding='utf-8') as file:
             dataset = json.load(file)
             format_func = format_tqa_DRC
-            # FIXME: temporary template
-            format_func = lambda question, answer: "请你对下面的语句作出回应：\n" + question + "\n好的，我的回答如下：\n" + answer
-    elif args.dataset == "Shakespeare": 
+    elif args.dataset == "Shakespeare":
         with open("dataset/Valid_Shakespeare.json", 'r', encoding='utf-8') as file:
             dataset = json.load(file)
             format_func = format_tqa_Shakespeare
@@ -313,9 +314,9 @@ def main(args):
     global SRC_ACTIVATIONS, TGT_ACTIVATIONS
     print("Loading activations...")
     activations = torch.load(args.activations_path)
-    source_activations = activations["source_activations"].to(model.device)
+    source_activations = activations["source_activations"].to(model.device).to(model.dtype)
     SRC_ACTIVATIONS = rearrange(source_activations, 'b l (h d) -> b l h d', h=model.config.num_attention_heads)
-    target_activations = activations["target_activations"].to(model.device)
+    target_activations = activations["target_activations"].to(model.device).to(model.dtype)
     TGT_ACTIVATIONS = rearrange(target_activations, 'b l (h d) -> b l h d', h=model.config.num_attention_heads)
 
     # load selected heads
@@ -323,6 +324,8 @@ def main(args):
     print("Loading selected heads...")
     with open(args.selected_heads_path, 'r', encoding='utf-8') as file:
         selected_heads = json.load(file)
+    # constrain the number of editing heads
+    selected_heads = selected_heads[:min(len(selected_heads), args.head_num)]
     # group by layer for convenience and efficiency
     for layer_idx, head_idx in selected_heads:
         if layer_idx not in SELECTED_HEADS_BY_LAYER:
@@ -356,7 +359,7 @@ def main(args):
         question = sample["question"]
         qa_prefix = format_func(question, "")
         if index == 0:
-            print("sanity check: sample[0]")
+            print("sanity check:")
             print(f"___question___")
             print(question)
             print(f"___qa_prefix___")
@@ -368,7 +371,7 @@ def main(args):
         response = generate_method(model,
                                    question_tokens,
                                    qa_prefix_tokens,
-                                   beta=args.beta,
+                                   global_scaling_factor=args.global_scaling_factor,
                                    KNN_neighbor_num=args.KNN_neighbor_num)
         time_cost = time.time() - tik
 
