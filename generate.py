@@ -291,11 +291,10 @@ def generate_faster(model, question_tokens, qa_prefix_tokens, max_length=600, **
 def main(args):
     # load model
     print("Loading model...")
-    config = transformers.AutoConfig.from_pretrained(args.model_dir)
     tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_dir)
     model = transformers.AutoModelForCausalLM.from_pretrained(args.model_dir,
                                                              low_cpu_mem_usage=True,
-                                                             torch_dtype=config.torch_dtype,
+                                                             torch_dtype="auto",
                                                              device_map="auto")
     model.config.oproj_bias = True
 
