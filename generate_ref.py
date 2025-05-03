@@ -9,16 +9,16 @@ from utils import format_tqa_DRC, format_tqa_Shakespeare
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, required=True)
-    parser.add_argument("--model_dir", type=str, required=True)
+    parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--save_dir", type=str, required=True)
     return parser.parse_args()
 
 def main(args):
     # load model
     print("Loading model...")
-    config = transformers.AutoConfig.from_pretrained(args.model_dir)
-    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_dir)
-    model = transformers.AutoModelForCausalLM.from_pretrained(args.model_dir,
+    config = transformers.AutoConfig.from_pretrained(args.model)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model)
+    model = transformers.AutoModelForCausalLM.from_pretrained(args.model,
                                                              low_cpu_mem_usage=True,
                                                              torch_dtype=config.torch_dtype,
                                                              device_map="auto")
@@ -78,8 +78,7 @@ def main(args):
     for i in range(len(answers)):
         dict = {}
         dict["question"] = dataset[i]["question"]
-        dict["daiyu_answer"] = answers[i]  # FIXME: to remove
-        dict["model_path"] = args.model_dir  # FIXME: to remove
+        dict["answer"] = answers[i]
         output_data.append(dict)
 
     os.makedirs(args.save_dir, exist_ok=True)

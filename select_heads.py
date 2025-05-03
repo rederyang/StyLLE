@@ -3,6 +3,7 @@ import json
 import argparse
 import torch
 import numpy as np
+import transformers
 from tqdm import tqdm
 from einops import rearrange
 from sklearn.linear_model import LogisticRegression
@@ -12,7 +13,7 @@ from sklearn.metrics import accuracy_score
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--activations_path", type=str, required=True)
-    parser.add_argument("--model_dir", type=str, required=True)
+    parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--save_dir", type=str, required=True)
     parser.add_argument("--num_heads", default=64, type=int)
     parser.add_argument("--val_ratio", default=0.2, type=float)
@@ -68,10 +69,9 @@ def main(args):
 
     # load model config
     print("Loading model config...")
-    with open(os.path.join(args.model_dir, "config.json"), "r") as f:
-        config = json.load(f)
-    MODEL_LAYERS = config["num_hidden_layers"]
-    MODEL_HEADS = config["num_attention_heads"]
+    config = transformers.AutoConfig.from_pretrained(args.model)
+    MODEL_LAYERS = config.num_hidden_layers
+    MODEL_HEADS = config.num_attention_heads
     print(f"model layers: {MODEL_LAYERS}")
     print(f"model heads: {MODEL_HEADS}")
 

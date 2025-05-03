@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument("--dataset", type=str, required=True)
     parser.add_argument("--activations_path", type=str, required=True)
     parser.add_argument("--selected_heads_path", type=str, required=True)
-    parser.add_argument("--model_dir", type=str, required=True)
+    parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--save_dir", type=str, required=True)
     # head number
     parser.add_argument("--head_num", type=int, default=64)
@@ -291,8 +291,8 @@ def generate_faster(model, question_tokens, qa_prefix_tokens, max_length=600, **
 def main(args):
     # load model
     print("Loading model...")
-    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_dir)
-    model = transformers.AutoModelForCausalLM.from_pretrained(args.model_dir,
+    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model)
+    model = transformers.AutoModelForCausalLM.from_pretrained(args.model,
                                                              low_cpu_mem_usage=True,
                                                              torch_dtype="auto",
                                                              device_map="auto")
@@ -392,8 +392,7 @@ def main(args):
     for i in range(len(answers)):
         dict = {}
         dict["question"] = dataset[i]["question"]
-        dict["daiyu_answer"] = answers[i]  # FIXME: to remove
-        dict["model_path"] = args.model_dir  # FIXME: to remove
+        dict["answer"] = answers[i]
         output_data.append(dict)
 
     os.makedirs(args.save_dir, exist_ok=True)

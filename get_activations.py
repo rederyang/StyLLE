@@ -11,7 +11,7 @@ from utils import prepare_tqa_dataset, format_tqa_DRC, format_tqa_Shakespeare, g
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, required=True)
-    parser.add_argument("--model_dir", type=str, required=True)
+    parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--save_dir", type=str, required=True)
     return parser.parse_args()
 
@@ -19,8 +19,8 @@ def parse_args():
 def main(args):
     # load model
     print("Loading model...")
-    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_dir)
-    model = transformers.AutoModelForCausalLM.from_pretrained(args.model_dir,
+    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model)
+    model = transformers.AutoModelForCausalLM.from_pretrained(args.model,
                                                              low_cpu_mem_usage=True,
                                                              torch_dtype="auto",
                                                              device_map="auto")
