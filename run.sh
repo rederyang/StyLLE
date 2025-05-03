@@ -2,6 +2,7 @@
 
 dataset="DRC"
 # model_dir="/root/autodl-tmp/models/Qwen3-8B"
+# assets_dir="/root/autodl-tmp/stylle_assets/Qwen3-8B_DRC"
 model_dir="/root/autodl-tmp/models/Qwen1.5-14B-Chat"
 assets_dir="/root/autodl-tmp/stylle_assets/Qwen1.5-14B-Chat_DRC"
 
